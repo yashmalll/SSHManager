@@ -23,10 +23,16 @@ DB = os.path.join(CONF_DIR, "hosts.json")
 FIELDS = [("name", "Название"), ("host", "Хост"), ("user", "Пользователь"),
           ("port", "Порт"), ("key", "Файл ключа"), ("tags", "Теги"), ("opts", "Доп. опции ssh")]
 
-LOGO = ["█ ▄▀  ▄▀▀▄  █▄ █",
-        "██    █  █  █ ▀█",
-        "█ ▀▄  ▀▄▄▀  █  █"]
-LOGO_SPANS = [(0, 4), (6, 10), (12, 16)]  # границы букв K / o / n
+BIG_LOGO = ["██╗  ██╗ ██████╗ ███╗   ██╗",
+            "██║ ██╔╝██╔═══██╗████╗  ██║",
+            "█████╔╝ ██║   ██║██╔██╗ ██║",
+            "██╔═██╗ ██║   ██║██║╚██╗██║",
+            "██║  ██╗╚██████╔╝██║ ╚████║",
+            "╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝"]
+GRAD_BASE = 16  # номера цветовых пар градиента логотипа (6 строк)
+LOGO = ["╦╔═  ╔═╗  ╔╗╔",
+        "╠╩╗  ║ ║  ║║║",
+        "╩ ╩  ╚═╝  ╝╚╝"]
 
 COMMANDS = {"q", "quit", "exit", "й", "a", "add", "new", "e", "edit", "c", "copy",
             "d", "del", "delete", "rm", "i", "import", "f", "fwd", "forward", "t", "tunnel"}
@@ -154,7 +160,8 @@ def command_word(buf):
 
 # ── палитра ────────────────────────────────────────────────────────────────
 (C_TEXT, C_DIM, C_ACC, C_SEL, C_HEAD, C_KEY, C_OK, C_ERR, C_TAG, C_BOX,
- C_L1, C_L2, C_L3) = range(1, 14)
+ C_L1, C_L2, C_L3, C_BDIM, C_BAR) = range(1, 16)
+DOT_COLORS = [C_L1, C_L2, C_L3, C_TAG, C_OK]
 
 
 def init_colors():
@@ -177,6 +184,12 @@ def init_colors():
     P(C_L1, 141 if big else curses.COLOR_MAGENTA, -1)  # логотип: градиент K → o → n
     P(C_L2, 75 if big else curses.COLOR_CYAN, -1)
     P(C_L3, 78 if big else curses.COLOR_GREEN, -1)
+    P(C_BDIM, 240 if big else curses.COLOR_BLUE, -1)
+    P(C_BAR, acc, 238 if big else curses.COLOR_BLUE)
+    grad = [141, 105, 69, 75, 80, 78] if big else [curses.COLOR_MAGENTA, curses.COLOR_MAGENTA, curses.COLOR_BLUE,
+                                                     curses.COLOR_CYAN, curses.COLOR_CYAN, curses.COLOR_GREEN]
+    for i, c in enumerate(grad):
+        P(GRAD_BASE + i, c, -1)
 
 
 def cp(n, extra=0):
@@ -247,6 +260,20 @@ class App:
             self.sel = 0
 
     # ── отрисовка ──
+    @staticmethod
+    def dot_color(h):
+        return DOT_COLORS[sum(map(ord, h["name"])) % len(DOT_COLORS)]
+
+    def put_hl(self, y, x, text, q, base, hl):
+        """Текст с подсветкой совпадения запроса."""
+        i = text.lower().find(q) if q else -1
+        if i < 0:
+            self.put(y, x, text, base)
+            return
+        self.put(y, x, text[:i], base)
+        self.put(y, x + i, text[i:i + len(q)], hl)
+        self.put(y, x + i + len(q), text[i + len(q):], base)
+
     def draw(self, focus=False):
         s = self.scr
         s.erase()
@@ -257,97 +284,160 @@ class App:
             return
         v = self.view()
         self.sel = max(0, min(self.sel, len(v) - 1))
+        q = "" if command_word(self.buf) else self.buf.lower()
+        nfwd = sum(len(h.get("forwards", [])) for h in self.items)
 
         # шапка с логотипом
-        big = H >= 24
-        if big:
-            for r, line in enumerate(LOGO):
-                for (a, b), col in zip(LOGO_SPANS, (C_L1, C_L2, C_L3)):
-                    self.put(r, 2 + a, line[a:b], cp(col, curses.A_BOLD))
-            self.put(0, 22, "SSH connection manager", cp(C_TEXT, curses.A_BOLD))
-            self.put(1, 22, "быстрый доступ к вашим серверам", cp(C_DIM))
-            stat = f"{len(v)}/{len(self.items)} хостов"
-            self.put(0, W - len(stat) - 2, stat, cp(C_ACC, curses.A_BOLD))
+        if H >= 30 and W >= 80:
+            for r, line in enumerate(BIG_LOGO):
+                self.put(r, 2, line, cp(GRAD_BASE + r, curses.A_BOLD))
+            self.put(1, 34, "▸ SSH connection manager", cp(C_TEXT, curses.A_BOLD))
+            self.put(2, 34, "быстрый доступ к вашим серверам", cp(C_DIM))
+            self.put(3, 34, "╶" + "─" * min(30, max(0, W - 60)) + "╴", cp(C_BDIM))
+            chip = f" {len(v)}/{len(self.items)} хостов "
+            self.put(0, W - len(chip) - 2, chip, cp(C_KEY, curses.A_BOLD))
+            fw = f"⇄ {nfwd} пробросов"
+            self.put(1, W - len(fw) - 3, fw, cp(C_TAG))
+            top_y = 6
+        elif H >= 24:
+            for r, (line, col) in enumerate(zip(LOGO, (C_L1, C_L2, C_L3))):
+                self.put(r, 2, line, cp(col, curses.A_BOLD))
+            self.put(0, 21, "▸ ", cp(C_L3, curses.A_BOLD))
+            self.put(0, 23, "SSH connection manager", cp(C_TEXT, curses.A_BOLD))
+            self.put(1, 23, "быстрый доступ к вашим серверам", cp(C_DIM))
+            self.put(2, 21, "╶" + "─" * min(32, max(0, W - 46)) + "╴", cp(C_BDIM))
+            chip = f" {len(v)}/{len(self.items)} хостов "
+            self.put(0, W - len(chip) - 2, chip, cp(C_KEY, curses.A_BOLD))
+            fw = f"⇄ {nfwd} пробросов"
+            self.put(1, W - len(fw) - 3, fw, cp(C_TAG))
             top_y = 3
         else:
             self.put(0, 0, " " * W, cp(C_HEAD))
-            self.put(0, 2, "K", cp(C_L1, curses.A_BOLD | curses.A_REVERSE))
-            self.put(0, 3, "o", cp(C_L2, curses.A_BOLD | curses.A_REVERSE))
-            self.put(0, 4, "n", cp(C_L3, curses.A_BOLD | curses.A_REVERSE))
+            for i, (ch, col) in enumerate(zip("Kon", (C_L1, C_L2, C_L3))):
+                self.put(0, 2 + i, ch, cp(col, curses.A_BOLD | curses.A_REVERSE))
             self.put(0, 7, "SSH manager", cp(C_HEAD, curses.A_BOLD))
             stat = f"{len(v)}/{len(self.items)} "
             self.put(0, W - len(stat), stat, cp(C_HEAD))
             top_y = 1
         ph = H - 4 - top_y
-        lw = max(32, W * 2 // 5)
+        lw = max(34, W * 2 // 5)
         rw = W - lw
         self.box(top_y, 0, ph, lw, "Хосты")
-        self.box(top_y, lw, ph, rw, "Детали")
+        self.box(top_y, lw, ph, rw, "Детали", cp(C_BDIM))
 
+        # список хостов
         rows = ph - 2
         if self.sel < self.top:
             self.top = self.sel
         if self.sel >= self.top + rows:
             self.top = self.sel - rows + 1
         self.top = max(0, min(self.top, max(0, len(v) - rows)))
-        nw = max(8, lw // 3)
+        iw = lw - 3  # ширина содержимого строки
         for i, h in enumerate(v[self.top: self.top + rows]):
             y = top_y + 1 + i
-            text = f" ● {h['name']:<{nw}.{nw}} {h['host']}"[: lw - 3].ljust(lw - 2)
-            if self.top + i == self.sel:
-                self.put(y, 1, text, cp(C_SEL, curses.A_BOLD))
-                self.put(y, 1, "▌", cp(C_ACC, curses.A_BOLD))
+            selected = self.top + i == self.sel
+            fws = [f for f in h.get("forwards", []) if f.get("on", True)]
+            badges = ("⇄" + (str(len(fws)) if len(fws) > 1 else "") + " " if fws else "") + ("⚿ " if h.get("key") else "")
+            badges = badges.rstrip()
+            nw = max(8, iw // 3)
+            if selected:
+                self.put(y, 1, " " * (lw - 2), cp(C_SEL))
+                self.put(y, 1, "▌", cp(C_BAR, curses.A_BOLD))
+                self.put(y, 3, "●", cp(C_SEL, curses.A_BOLD))
+                self.put(y, 5, f"{h['name']:<{nw}.{nw}}", cp(C_SEL, curses.A_BOLD))
+                self.put(y, 6 + nw, h["host"][: max(0, iw - nw - len(badges) - 5)], cp(C_SEL))
+                if badges:
+                    self.put(y, lw - 2 - len(badges), badges, cp(C_BAR, curses.A_BOLD))
             else:
-                self.put(y, 1, text, cp(C_TEXT))
-                self.put(y, 3, "●", cp(C_ACC))
+                self.put(y, 3, "●", cp(self.dot_color(h)))
+                self.put_hl(y, 5, f"{h['name']:<{nw}.{nw}}", q, cp(C_TEXT, curses.A_BOLD), cp(C_TAG, curses.A_BOLD | curses.A_UNDERLINE))
+                self.put_hl(y, 6 + nw, h["host"][: max(0, iw - nw - len(badges) - 5)], q, cp(C_DIM), cp(C_TAG, curses.A_UNDERLINE))
+                if badges:
+                    self.put(y, lw - 2 - len(badges), badges, cp(C_TAG))
         if len(v) > rows:  # скроллбар
             bar_h = max(1, rows * rows // len(v))
             bar_y = (rows - bar_h) * self.top // max(1, len(v) - rows)
             for i in range(bar_h):
                 self.put(top_y + 1 + bar_y + i, lw - 1, "┃", cp(C_ACC))
+        if not v:
+            if self.items:
+                self.put(top_y + 2, 4, "Ничего не найдено", cp(C_DIM, curses.A_BOLD))
+                self.put(top_y + 3, 4, "Esc — сбросить поиск", cp(C_DIM))
+            else:
+                self.put(top_y + 2, 4, "Пока нет ни одного хоста", cp(C_DIM, curses.A_BOLD))
+                self.put(top_y + 4, 4, " ^N ", cp(C_KEY, curses.A_BOLD))
+                self.put(top_y + 4, 9, "добавить вручную", cp(C_DIM))
+                self.put(top_y + 5, 4, " ^O ", cp(C_KEY, curses.A_BOLD))
+                self.put(top_y + 5, 9, "импорт из ssh config", cp(C_DIM))
 
+        # карточка деталей
         cur = self.current()
         if cur:
             x = lw + 3
-            self.put(top_y + 1, x, cur["name"], cp(C_ACC, curses.A_BOLD))
-            self.put(top_y + 2, x, "─" * max(0, rw - 6), cp(C_DIM))
-            for i, (k, label) in enumerate(FIELDS[1:]):
-                y = top_y + 3 + i
-                self.put(y, x, f"{label:<16}", cp(C_DIM))
-                if k == "tags" and cur.get(k):
-                    cx = x + 16
-                    for t in cur[k].replace(",", " ").split():
-                        self.put(y, cx, f" #{t} ", cp(C_TAG, curses.A_BOLD))
-                        cx += len(t) + 3
-                else:
-                    self.put(y, x + 16, str(cur.get(k, "")) or "—", cp(C_TEXT))
-            y = top_y + 4 + len(FIELDS)
+            maxw = rw - 6
+            self.put(top_y + 1, x, "●", cp(self.dot_color(cur), curses.A_BOLD))
+            self.put(top_y + 1, x + 2, cur["name"][:maxw - 2], cp(C_ACC, curses.A_BOLD))
+            who = (cur["user"] + "@" if cur.get("user") else "") + cur["host"] + (
+                "" if str(cur.get("port", "22")) == "22" else ":" + str(cur["port"]))
+            self.put(top_y + 2, x + 2, who[:maxw - 2], cp(C_DIM))
+            self.put(top_y + 3, x, "─" * max(0, maxw), cp(C_BDIM))
+            y = top_y + 4
+            cmd_h = 3
+            y_cmd = top_y + ph - 1 - cmd_h
+            show_cmd = y_cmd > y + 2
+
+            def row(label, value, attr=None):
+                nonlocal y
+                self.put(y, x, f"{label:<10}", cp(C_DIM))
+                self.put(y, x + 10, str(value)[: maxw - 10], attr or cp(C_TEXT))
+                y += 1
+
+            row("⚿ Ключ", cur.get("key") or "—")
+            if cur.get("opts"):
+                row("⚙ Опции", cur["opts"])
+            tags = cur.get("tags", "").replace(",", " ").split()
+            self.put(y, x, f"{'# Теги':<10}", cp(C_DIM))
+            if tags:
+                cx = x + 10
+                for t in tags:
+                    if cx + len(t) + 3 > x + maxw:
+                        break
+                    self.put(y, cx, f" {t} ", cp(C_KEY))
+                    cx += len(t) + 3
+            else:
+                self.put(y, x + 10, "—", cp(C_DIM))
+            y += 2
             fws = cur.get("forwards", [])
-            self.put(y, x, "Проброс портов", cp(C_DIM))
-            if not fws:
-                self.put(y, x + 16, "— (Ctrl+F)", cp(C_DIM))
-            for j, f in enumerate(fws[: max(0, ph - (y - top_y) - 5)]):
-                self.put(y + 1 + j, x + 2, ("● " if f.get("on", True) else "○ ") + fwd_text(f),
-                         cp(C_TAG if f.get("on", True) else C_DIM))
-            y += 1 + min(len(fws), max(0, ph - (y - top_y) - 5))
-            if y - top_y < ph - 3:
-                self.put(y + 1, x, "Команда", cp(C_DIM))
-                self.put(y + 2, x, "$ " + " ".join(ssh_cmd(cur)), cp(C_OK, curses.A_BOLD))
-        else:
-            self.put(top_y + 2, 3, "Список пуст", cp(C_DIM, curses.A_BOLD))
-            self.put(top_y + 4, 3, "a — добавить хост", cp(C_DIM))
-            self.put(top_y + 5, 3, "i — импорт с выбором", cp(C_DIM))
+            self.put(y, x, "⇄ Проброс портов", cp(C_ACC, curses.A_BOLD))
+            self.put(y, x + 19, "Ctrl+F" if not fws else f"{len(fws)}", cp(C_DIM))
+            y += 1
+            limit = (y_cmd - 1) if show_cmd else (top_y + ph - 2)
+            for f in fws:
+                if y >= limit:
+                    break
+                on = f.get("on", True)
+                self.put(y, x + 1, ("● " if on else "○ ") + fwd_text(f)[: maxw - 3],
+                         cp(C_TAG) if on else cp(C_DIM))
+                y += 1
+            if show_cmd:
+                self.box(y_cmd, lw + 2, cmd_h, rw - 4, "Команда", cp(C_BDIM))
+                self.put(y_cmd + 1, lw + 4, ("$ " + " ".join(ssh_cmd(cur)))[: rw - 8], cp(C_OK, curses.A_BOLD))
 
         # строка ввода (поиск + команды)
         self.box(H - 4, 0, 3, W, "Поиск / команда")
-        self.put(H - 3, 2, "›", cp(C_ACC, curses.A_BOLD))
+        self.put(H - 3, 2, "❯", cp(C_ACC, curses.A_BOLD))
         if self.buf:
-            self.put(H - 3, 4, self.buf, cp(C_ACC if command_word(self.buf) else C_TEXT))
+            self.put(H - 3, 4, self.buf, cp(C_ACC, curses.A_BOLD) if command_word(self.buf) else cp(C_TEXT))
         else:
-            self.put(H - 3, 4, "введите текст для поиска или команду (a e c d i q)…", cp(C_DIM))
+            self.put(H - 3, 4, "введите текст для поиска или команду (a e c d i f t q)…", cp(C_DIM))
         text, col = self.msg
         if text:
+            icon = {C_OK: "✓ ", C_ERR: "✗ "}.get(col, "• ")
+            text = icon + text
             self.put(H - 3, max(4, W - len(text) - 3), text, cp(col, curses.A_BOLD))
+        elif q:
+            info = f"найдено: {len(v)}"
+            self.put(H - 3, max(4, W - len(info) - 3), info, cp(C_DIM))
         keys = [("↵", "подкл."), ("^N", "новый"), ("^E", "ред."), ("^D", "удал."), ("^F", "порты"),
                 ("^T", "туннель"), ("^O", "импорт"), ("^K", "копия"), ("↑↓", "выбор"), ("q", "выход")]
         x = 1
@@ -367,6 +457,9 @@ class App:
         w = min(w, W - 2)
         h = min(h, H)
         y, x = max(0, (H - h) // 2), max(0, (W - w) // 2)
+        for i in range(1, h + 1):  # тень справа и снизу
+            self.put(y + i, x + w, "▒", cp(C_BDIM))
+        self.put(y + h, x + 1, "▒" * w, cp(C_BDIM))
         self.fill(y, x, h, w)
         self.box(y, x, h, w, title)
         return y, x, w
@@ -460,7 +553,7 @@ class App:
                 off = max(0, pos - fw + 1) if act else 0
                 shown = v[off: off + fw]
                 self.put(fy, x + 22, shown.ljust(fw) if act else shown, cp(C_SEL) if act else cp(C_TEXT))
-            self.put(y + fh - 2, x + 3, err or "Tab/↑↓ поля · Enter далее · Ctrl+S сохранить · Esc отмена",
+            self.put(y + fh - 2, x + 3, (err or "Tab/↑↓ поля · Enter далее · Ctrl+S сохранить · Esc отмена")[: w - 6],
                      cp(C_ERR, curses.A_BOLD) if err else cp(C_DIM))
             off = max(0, pos - fw + 1)
             self.scr.move(y + 1 + i * step + (1 if step == 2 else 0), x + 22 + pos - off)
@@ -513,8 +606,8 @@ class App:
                 line = f" {mark} {h['name']:<22.22} {who + addr:<30.30} {h['_src']}"[: w - 4].ljust(w - 4)
                 attr = cp(C_SEL, curses.A_BOLD) if idx == cur else cp(C_OK if idx in checked else C_TEXT)
                 self.put(y + 2 + r, x + 2, line, attr)
-            self.put(y + rows + 3, x + 2,
-                     "↑↓ выбор · Space отметить · a все · n снять · Enter импорт · Esc отмена",
+            self.put(y + rows + 3, x + 3,
+                     "↑↓ выбор · Space отметить · a все · n снять · Enter импорт · Esc отмена"[: w - 6],
                      cp(C_DIM))
             self.scr.refresh()
             ch = self.scr.get_wch()
@@ -551,16 +644,17 @@ class App:
             rows = max(1, mh - 6)
             top = max(0, cur - rows + 1)
             if not fws:
-                self.put(y + 2, x + 3, "Пробросов нет. Нажмите 'a', чтобы добавить.", cp(C_DIM))
-                self.put(y + 3, x + 3, "L: порт сервера → у вас · R: ваш порт → на сервер · D: SOCKS5", cp(C_DIM))
+                self.put(y + 2, x + 3, "Пробросов нет. Нажмите 'a', чтобы добавить."[: w - 6], cp(C_DIM))
+                self.put(y + 3, x + 3, "L: порт сервера → у вас · R: ваш порт → на сервер · D: SOCKS5"[: w - 6], cp(C_DIM))
             for r, f in enumerate(fws[top: top + rows]):
                 idx = top + r
                 mark = "[x]" if f.get("on", True) else "[ ]"
-                line = f" {mark} {fwd_text(f)}"[: w - 4].ljust(w - 4)
+                line = f" {mark} {fwd_text(f)}"[: w - 6].ljust(w - 6)
                 attr = cp(C_SEL, curses.A_BOLD) if idx == cur else (cp(C_TEXT) if f.get("on", True) else cp(C_DIM))
-                self.put(y + 2 + r, x + 2, line, attr)
-            self.put(y + mh - 3, x + 2, "Space вкл/выкл · a добавить · e изменить · d удалить · Esc закрыть", cp(C_DIM))
-            self.put(y + mh - 2, x + 2, "Включённые пробросы применяются при подключении (Enter) и в режиме туннеля (t).", cp(C_DIM))
+                self.put(y + 2 + r, x + 3, line, attr)
+            iw = w - 6  # ширина текста внутри рамки
+            self.put(y + mh - 3, x + 3, "Space вкл/выкл · a добавить · e изменить · d удалить · Esc закрыть"[:iw], cp(C_DIM))
+            self.put(y + mh - 2, x + 3, "Включённые пробросы работают при подключении (↵) и в туннеле (t)"[:iw], cp(C_DIM))
             self.scr.refresh()
             ch = self.scr.get_wch()
             if ch == curses.KEY_DOWN and fws:
