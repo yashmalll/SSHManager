@@ -6,8 +6,9 @@
   ↑/↓ PgUp/PgDn   выбор хоста         Enter   подключиться / выполнить команду
   Ctrl+N          новый хост          Ctrl+E  редактировать
   Ctrl+D          удалить             Ctrl+K  копировать
-  Ctrl+O          импорт (с выбором)  Esc     очистить ввод / выход
-Команды: a e c d i q (add edit copy del import quit).
+  Ctrl+O          импорт (с выбором)  Ctrl+F  проброс портов хоста
+  Ctrl+T          только туннель (ssh -N)   Esc  очистить ввод / выход
+Команды: a e c d i f t q (add edit copy del import forward tunnel quit).
 """
 import os
 
@@ -28,7 +29,11 @@ LOGO = ["█ ▄▀  ▄▀▀▄  █▄ █",
 LOGO_SPANS = [(0, 4), (6, 10), (12, 16)]  # границы букв K / o / n
 
 COMMANDS = {"q", "quit", "exit", "й", "a", "add", "new", "e", "edit", "c", "copy",
-            "d", "del", "delete", "rm", "i", "import"}
+            "d", "del", "delete", "rm", "i", "import", "f", "fwd", "forward", "t", "tunnel"}
+
+FWD_FIELDS = [("type", "Тип (L / R / D)"), ("listen", "Порт (listen)"),
+              ("dhost", "Хост назначения"), ("dport", "Порт назначения")]
+FWD_NAMES = {"L": "локальный", "R": "обратный", "D": "SOCKS5"}
 
 
 # ── данные ─────────────────────────────────────────────────────────────────
@@ -48,7 +53,26 @@ def save(items):
     os.replace(tmp, DB)
 
 
-def ssh_cmd(h):
+def fwd_arg(f):
+    """Аргумент ssh для проброса: L — -L listen:dhost:dport, R — -R listen:dhost:dport, D — -D listen."""
+    t = f.get("type", "L").upper()
+    if t == "D":
+        return [f"-D{f['listen']}"]
+    return [f"-{t}{f['listen']}:{f.get('dhost') or 'localhost'}:{f['dport']}"]
+
+
+def fwd_text(f):
+    """Человекочитаемое описание проброса."""
+    t = f.get("type", "L").upper()
+    dest = f"{f.get('dhost') or 'localhost'}:{f.get('dport', '')}"
+    if t == "D":
+        return f"D  SOCKS5-прокси на :{f['listen']}"
+    if t == "R":
+        return f"R  сервер :{f['listen']}  →  {dest} (у вас)"
+    return f"L  у вас :{f['listen']}  →  {dest} (на сервере)"
+
+
+def ssh_cmd(h, tunnel=False):
     cmd = ["ssh"]
     if h.get("port") and str(h["port"]) != "22":
         cmd += ["-p", str(h["port"])]
@@ -56,6 +80,11 @@ def ssh_cmd(h):
         cmd += ["-i", os.path.expanduser(h["key"])]
     if h.get("opts"):
         cmd += h["opts"].split()
+    fw = [f for f in h.get("forwards", []) if f.get("on", True)]
+    for f in fw:
+        cmd += fwd_arg(f)
+    if tunnel:
+        cmd += ["-N", "-o", "ExitOnForwardFailure=yes"]
     cmd.append(f"{h['user']}@{h['host']}" if h.get("user") else h["host"])
     return cmd
 
@@ -293,8 +322,17 @@ class App:
                 else:
                     self.put(y, x + 16, str(cur.get(k, "")) or "—", cp(C_TEXT))
             y = top_y + 4 + len(FIELDS)
-            self.put(y, x, "Команда", cp(C_DIM))
-            self.put(y + 1, x, "$ " + " ".join(ssh_cmd(cur)), cp(C_OK, curses.A_BOLD))
+            fws = cur.get("forwards", [])
+            self.put(y, x, "Проброс портов", cp(C_DIM))
+            if not fws:
+                self.put(y, x + 16, "— (Ctrl+F)", cp(C_DIM))
+            for j, f in enumerate(fws[: max(0, ph - (y - top_y) - 5)]):
+                self.put(y + 1 + j, x + 2, ("● " if f.get("on", True) else "○ ") + fwd_text(f),
+                         cp(C_TAG if f.get("on", True) else C_DIM))
+            y += 1 + min(len(fws), max(0, ph - (y - top_y) - 5))
+            if y - top_y < ph - 3:
+                self.put(y + 1, x, "Команда", cp(C_DIM))
+                self.put(y + 2, x, "$ " + " ".join(ssh_cmd(cur)), cp(C_OK, curses.A_BOLD))
         else:
             self.put(top_y + 2, 3, "Список пуст", cp(C_DIM, curses.A_BOLD))
             self.put(top_y + 4, 3, "a — добавить хост", cp(C_DIM))
@@ -310,10 +348,12 @@ class App:
         text, col = self.msg
         if text:
             self.put(H - 3, max(4, W - len(text) - 3), text, cp(col, curses.A_BOLD))
-        keys = [("↑↓", "выбор"), ("↵", "подкл."), ("^N", "новый"), ("^E", "ред."), ("^D", "удал."),
-                ("^K", "копия"), ("^O", "импорт"), ("q", "выход")]
+        keys = [("↵", "подкл."), ("^N", "новый"), ("^E", "ред."), ("^D", "удал."), ("^F", "порты"),
+                ("^T", "туннель"), ("^O", "импорт"), ("^K", "копия"), ("↑↓", "выбор"), ("q", "выход")]
         x = 1
         for k, d in keys:
+            if x + len(k) + len(d) + 6 > W:
+                break
             self.put(H - 1, x, f" {k} ", cp(C_KEY, curses.A_BOLD))
             self.put(H - 1, x + len(k) + 2, f" {d} ", cp(C_DIM))
             x += len(k) + len(d) + 6
@@ -379,20 +419,41 @@ class App:
             pos += 1
         return "stay", buf, pos
 
-    def form(self, h, title):
-        vals = {k: str(h.get(k, "")) for k, _ in FIELDS}
-        i, pos = 0, len(vals["name"])
+    @staticmethod
+    def validate_host(vals):
+        if not vals["name"].strip():
+            return "Название обязательно", 0
+        if not vals["host"].strip():
+            return "Хост обязателен", 1
+        return None
+
+    @staticmethod
+    def validate_fwd(vals):
+        t = vals["type"].strip().upper()
+        if t not in FWD_NAMES:
+            return "Тип: L (локальный), R (обратный) или D (SOCKS)", 0
+        if not vals["listen"].strip().isdigit():
+            return "Порт должен быть числом", 1
+        if t != "D" and not vals["dport"].strip().isdigit():
+            return "Порт назначения должен быть числом", 3
+        return None
+
+    def form(self, h, title, fields=None, validate=None):
+        fields = fields or FIELDS
+        validate = validate or self.validate_host
+        vals = {k: str(h.get(k, "")) for k, _ in fields}
+        i, pos = 0, len(vals[fields[0][0]])
         err = ""
         H, _ = self.scr.getmaxyx()
-        step = 2 if H >= len(FIELDS) * 2 + 6 else 1
+        step = 2 if H >= len(fields) * 2 + 6 else 1
         while True:
             self.draw()
-            fh = len(FIELDS) * step + 4
+            fh = len(fields) * step + 4
             y, x, w = self.modal(fh, 64, title)
             fw = max(8, w - 24)
-            for n, (k, label) in enumerate(FIELDS):
+            for n, (k, label) in enumerate(fields):
                 fy = y + 1 + n * step + (1 if step == 2 else 0)
-                req = " *" if k in ("name", "host") else ""
+                req = " *" if fields is FIELDS and k in ("name", "host") else ""
                 act = n == i
                 self.put(fy, x + 3, f"{label + req:<19}", cp(C_ACC, curses.A_BOLD) if act else cp(C_DIM))
                 v = vals[k]
@@ -405,26 +466,27 @@ class App:
             self.scr.move(y + 1 + i * step + (1 if step == 2 else 0), x + 22 + pos - off)
             curses.curs_set(1)
             self.scr.refresh()
-            k = FIELDS[i][0]
+            k = fields[i][0]
             act, vals[k], pos = self.read_line(vals[k], pos)
             curses.curs_set(0)
             if act == "cancel":
                 return None
             if act in ("next", "prev", "save"):
-                if act == "next" and i < len(FIELDS) - 1:
+                if act == "next" and i < len(fields) - 1:
                     i += 1
                 elif act == "prev" and i > 0:
                     i -= 1
-                elif act == "save" or (act == "next" and i == len(FIELDS) - 1):
-                    if not vals["name"].strip() or not vals["host"].strip():
-                        err = "Название и хост обязательны"
-                        i = 0 if not vals["name"].strip() else 1
+                elif act == "save" or (act == "next" and i == len(fields) - 1):
+                    bad = validate(vals)
+                    if bad:
+                        err, i = bad
                     else:
                         out = dict(h)
                         out.update({k2: v2.strip() for k2, v2 in vals.items()})
-                        out["port"] = out.get("port") or "22"
+                        if fields is FIELDS:
+                            out["port"] = out.get("port") or "22"
                         return out
-                pos = len(vals[FIELDS[i][0]])
+                pos = len(vals[fields[i][0]])
                 if act != "save":
                     err = ""
 
@@ -476,6 +538,74 @@ class App:
             elif ch == "\x1b":
                 return None
 
+    def fwd_manager(self, h):
+        """Окно пробросов хоста: Space вкл/выкл, a добавить, e изменить, d удалить, Enter/Esc закрыть."""
+        fws = h.setdefault("forwards", [])
+        cur = 0
+        curses.curs_set(0)
+        while True:
+            self.draw()
+            H, W = self.scr.getmaxyx()
+            mh = min(H - 2, max(len(fws), 2) + 7)
+            y, x, w = self.modal(mh, min(W - 4, 78), f"Проброс портов: {h['name']}")
+            rows = max(1, mh - 6)
+            top = max(0, cur - rows + 1)
+            if not fws:
+                self.put(y + 2, x + 3, "Пробросов нет. Нажмите 'a', чтобы добавить.", cp(C_DIM))
+                self.put(y + 3, x + 3, "L: порт сервера → у вас · R: ваш порт → на сервер · D: SOCKS5", cp(C_DIM))
+            for r, f in enumerate(fws[top: top + rows]):
+                idx = top + r
+                mark = "[x]" if f.get("on", True) else "[ ]"
+                line = f" {mark} {fwd_text(f)}"[: w - 4].ljust(w - 4)
+                attr = cp(C_SEL, curses.A_BOLD) if idx == cur else (cp(C_TEXT) if f.get("on", True) else cp(C_DIM))
+                self.put(y + 2 + r, x + 2, line, attr)
+            self.put(y + mh - 3, x + 2, "Space вкл/выкл · a добавить · e изменить · d удалить · Esc закрыть", cp(C_DIM))
+            self.put(y + mh - 2, x + 2, "Включённые пробросы применяются при подключении (Enter) и в режиме туннеля (t).", cp(C_DIM))
+            self.scr.refresh()
+            ch = self.scr.get_wch()
+            if ch == curses.KEY_DOWN and fws:
+                cur = min(cur + 1, len(fws) - 1)
+            elif ch == curses.KEY_UP:
+                cur = max(cur - 1, 0)
+            elif ch == " " and fws:
+                fws[cur]["on"] = not fws[cur].get("on", True)
+                self.changed()
+            elif ch in ("a", "ф"):
+                f = self.form({"type": "L", "dhost": "localhost", "on": True}, "Новый проброс",
+                              FWD_FIELDS, self.validate_fwd)
+                if f:
+                    f["type"] = f["type"].upper()
+                    fws.append(f)
+                    cur = len(fws) - 1
+                    self.changed()
+            elif ch in ("e", "у") and fws:
+                f = self.form(fws[cur], "Изменить проброс", FWD_FIELDS, self.validate_fwd)
+                if f:
+                    f["type"] = f["type"].upper()
+                    fws[cur] = f
+                    self.changed()
+            elif ch in ("d", "в", curses.KEY_DC) and fws:
+                if self.confirm("Удалить проброс?"):
+                    fws.pop(cur)
+                    cur = max(0, min(cur, len(fws) - 1))
+                    self.changed()
+            elif ch in ("\x1b", "\n", "\r", curses.KEY_ENTER):
+                return
+
+    def act_fwd(self, cur):
+        if not cur:
+            self.msg = ("Нет выбранного хоста", C_ERR)
+            return
+        self.fwd_manager(cur)
+
+    def act_tunnel(self, cur):
+        if not cur:
+            self.msg = ("Нет выбранного хоста", C_ERR)
+        elif not any(f.get("on", True) for f in cur.get("forwards", [])):
+            self.msg = ("Нет включённых пробросов (Ctrl+F)", C_ERR)
+        else:
+            self.connect(cur, tunnel=True)
+
     def unique_name(self, name):
         names = {h["name"] for h in self.items}
         while name in names:
@@ -502,15 +632,24 @@ class App:
             self.changed()
             self.msg = (f"Импортировано: {len(chosen)}", C_OK)
 
-    def connect(self, h):
+    def connect(self, h, tunnel=False):
         curses.endwin()
         os.system("clear")
-        print("\033[1;36m$ " + " ".join(ssh_cmd(h)) + "\033[0m\n", flush=True)
+        cmd = ssh_cmd(h, tunnel)
+        print("\033[1;36m$ " + " ".join(cmd) + "\033[0m")
+        if tunnel:
+            print("\033[1;32mТуннель запущен. Ctrl+C — остановить и вернуться в Kon.\033[0m")
+            for f in h.get("forwards", []):
+                if f.get("on", True):
+                    print("  " + fwd_text(f))
+        print(flush=True)
         try:
             import subprocess
-            subprocess.call(ssh_cmd(h))
+            subprocess.call(cmd)
         except FileNotFoundError:
             input("ssh не найден. Enter для возврата...")
+        except KeyboardInterrupt:
+            pass
         self.scr.refresh()
 
     # ── действия ──
@@ -535,7 +674,8 @@ class App:
         if not cur:
             self.msg = ("Нет выбранного хоста", C_ERR)
             return
-        self.items.append(dict(cur, name=self.unique_name(cur["name"] + "-copy")))
+        import copy
+        self.items.append(dict(copy.deepcopy(cur), name=self.unique_name(cur["name"] + "-copy")))
         self.changed()
         self.msg = ("Скопировано", C_OK)
 
@@ -561,6 +701,10 @@ class App:
             self.act_delete(cur)
         elif name in ("i", "import"):
             self.do_import()
+        elif name in ("f", "fwd", "forward"):
+            self.act_fwd(cur)
+        elif name in ("t", "tunnel"):
+            self.act_tunnel(cur)
         return False
 
     def run(self):
@@ -594,6 +738,10 @@ class App:
                 self.act_copy(cur)
             elif ch == "\x0f":
                 curses.curs_set(0); self.do_import()
+            elif ch == "\x06":
+                curses.curs_set(0); self.act_fwd(cur)
+            elif ch == "\x14":
+                self.act_tunnel(cur)
             elif ch in ("\n", "\r", curses.KEY_ENTER):
                 word = command_word(self.buf)
                 if word:
